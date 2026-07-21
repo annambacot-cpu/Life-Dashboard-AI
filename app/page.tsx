@@ -1,36 +1,37 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { strFromU8, unzipSync } from "fflate";
 
 type Task = { id: number; title: string; meta: string; done: boolean; tag: string };
 type Goal = { id: number; title: string; progress: number; detail: string; color: string };
 type Project = { id: number; title: string; category: string; progress: number; next: string; status: string; color: string };
 type Habit = { id: number; name: string; streak: number; week: boolean[] };
-type Decision = { id: number; title: string; confidence: number; date: string; status: string };
 type Note = { id: number; title: string; tag: string; excerpt: string };
 type CalendarEvent = { id: number; title: string; date: string; time: string; category: string };
 type Thought = { id: number; text: string; date: string; type: "Lesson" | "Quote" | "On my mind" };
-type Kind = "task" | "goal" | "project" | "habit" | "decision" | "note" | "event" | "thought";
-type Editable = Task | Goal | Project | Habit | Decision | Note | CalendarEvent | Thought;
+type KnowledgeFile = { id: number; name: string; size: number; addedAt: string; text: string; kind: string };
+type Kind = "task" | "goal" | "project" | "habit" | "note" | "event" | "thought";
+type Editable = Task | Goal | Project | Habit | Note | CalendarEvent | Thought;
 type DashboardState = {
-  tasks: Task[]; goals: Goal[]; projects: Project[]; habits: Habit[]; decisions: Decision[];
+  tasks: Task[]; goals: Goal[]; projects: Project[]; habits: Habit[];
   notes: Note[]; events: CalendarEvent[]; thoughts: Thought[]; reflection: string;
 };
 
 const STORAGE_KEY = "life-dashboard-ai-v2";
-const emptyState: DashboardState = { tasks: [], goals: [], projects: [], habits: [], decisions: [], notes: [], events: [], thoughts: [], reflection: "" };
+const emptyState: DashboardState = { tasks: [], goals: [], projects: [], habits: [], notes: [], events: [], thoughts: [], reflection: "" };
 const navItems = [
   ["overview", "⌂", "Overview"], ["goals", "◎", "Goals"], ["projects", "◇", "Projects"],
   ["habits", "↻", "Habits"], ["calendar", "□", "Calendar"], ["notes", "≡", "Notes & knowledge"],
-  ["decisions", "⌘", "Decisions"], ["thoughts", "✦", "Daily thoughts"],
+  ["thoughts", "✦", "Daily thoughts"],
 ] as const;
 const viewCopy: Record<string, [string, string]> = {
   goals: ["Goals", "Turn the life you want into progress you can see."], projects: ["Projects", "Everything active, with the next action already decided."],
   habits: ["Habits", "Build consistency one honest check-in at a time."], calendar: ["Calendar", "See your commitments without losing sight of what matters."],
-  notes: ["Notes & knowledge", "Your private, searchable brain for ideas, research, and memories."], decisions: ["Decision journal", "Record your reasoning so future you can learn from it."],
+  notes: ["Notes & knowledge", "Bring your documents and ideas together, then turn them into clear next actions."],
   thoughts: ["Daily thoughts", "Keep the lessons, quotes, and honest thoughts that shape who you’re becoming."],
 };
-const kindForView: Record<string, Kind> = { goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", decisions: "decision", thoughts: "thought" };
+const kindForView: Record<string, Kind> = { goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", thoughts: "thought" };
 const colorOptions = ["#28645c", "#de7d4c", "#7763a8", "#4177a6", "#a65d75"];
 
 function todayInput() { return new Date().toISOString().slice(0, 10); }
@@ -49,6 +50,71 @@ function thoughtInsights(thoughts: Thought[]) {
   return { themes, thisMonth, streak };
 }
 
+function openKnowledgeDB() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open("life-dashboard-knowledge", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("files", { keyPath: "id" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function loadKnowledgeFiles() {
+  const db = await openKnowledgeDB();
+  return new Promise<KnowledgeFile[]>((resolve, reject) => {
+    const request = db.transaction("files", "readonly").objectStore("files").getAll();
+    request.onsuccess = () => resolve(request.result as KnowledgeFile[]);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function storeKnowledgeFile(file: KnowledgeFile) {
+  const db = await openKnowledgeDB();
+  await new Promise<void>((resolve, reject) => {
+    const request = db.transaction("files", "readwrite").objectStore("files").put(file);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+async function eraseKnowledgeFile(id: number) {
+  const db = await openKnowledgeDB();
+  await new Promise<void>((resolve, reject) => {
+    const request = db.transaction("files", "readwrite").objectStore("files").delete(id);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+function decodeXmlText(xml: string) {
+  const pieces = [...xml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)].map((match) => match[1]);
+  const doc = new DOMParser().parseFromString(pieces.join(" "), "text/html");
+  return doc.documentElement.textContent?.replace(/\s+/g, " ").trim() || "";
+}
+async function readUploadedFile(file: File) {
+  const extension = file.name.split(".").pop()?.toLowerCase() || "file";
+  if (extension === "docx") {
+    const archive = unzipSync(new Uint8Array(await file.arrayBuffer()));
+    const documentXml = archive["word/document.xml"];
+    if (!documentXml) throw new Error("This Word file could not be read.");
+    return { text: decodeXmlText(strFromU8(documentXml)), kind: "Word document" };
+  }
+  const raw = await file.text();
+  if (extension === "gdoc") {
+    let url = "";
+    try { url = JSON.parse(raw).url || ""; } catch { /* Keep it as a saved reference. */ }
+    return { text: url ? `Google Doc reference: ${url}` : "Google Doc reference saved. Export it as a Word document to include its full text in suggestions.", kind: "Google Doc link" };
+  }
+  if (extension === "rtf") return { text: raw.replace(/\\[a-z]+\d* ?|[{}]/gi, " ").replace(/\s+/g, " ").trim(), kind: "Rich text" };
+  return { text: raw, kind: extension === "md" ? "Markdown" : "Text document" };
+}
+
+function focusFromKnowledge(files: KnowledgeFile[], notes: Note[], tasks: Task[]) {
+  const openTask = tasks.find((task) => !task.done);
+  const combined = [...files.map((file) => file.text), ...notes.map((note) => `${note.title} ${note.excerpt}`)].join(" ").toLowerCase();
+  const priorityLines = combined.split(/[.\n]/).filter((line) => /deadline|priority|next step|follow up|today|important|finish|submit|due/.test(line)).map((line) => line.trim()).filter(Boolean);
+  if (priorityLines[0]) return `Your knowledge library points to this: “${priorityLines[0].slice(0, 180)}.” Turn that into one clear action today.`;
+  if (openTask) return `Start with “${openTask.title}.” It is the first unfinished item on your focus list.`;
+  if (files.length || notes.length) return `You have ${files.length + notes.length} items in your knowledge library. Review the newest one and capture its single most useful next action.`;
+  return "Upload a document or add a note, and I’ll use it with your goals and tasks to suggest a focus.";
+}
+
 export default function Home() {
   const [data, setData] = useState<DashboardState>(emptyState);
   const [active, setActive] = useState("overview");
@@ -57,6 +123,7 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("Add your goals and focus tasks, then ask me what deserves your attention.");
   const [noteSearch, setNoteSearch] = useState("");
+  const [knowledgeFiles, setKnowledgeFiles] = useState<KnowledgeFile[]>([]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -75,6 +142,9 @@ export default function Home() {
     }, 250);
     return () => window.clearTimeout(timer);
   }, [data, loaded]);
+  useEffect(() => {
+    loadKnowledgeFiles().then((files) => setKnowledgeFiles(files.sort((a, b) => b.id - a.id))).catch(() => setKnowledgeFiles([]));
+  }, []);
 
   const todayDone = data.tasks.filter((task) => task.done).length;
   const alignment = data.goals.length ? Math.round(data.goals.reduce((sum, goal) => sum + goal.progress, 0) / data.goals.length) : 0;
@@ -92,7 +162,8 @@ export default function Home() {
     else if (q.includes("goal") || q.includes("progress")) setAnswer(topGoal ? `${topGoal.title} is currently at ${topGoal.progress}%. A small next action today will keep it moving.` : "Add a goal first, then I can help you track its progress.");
     else if (q.includes("habit")) setAnswer(data.habits.length ? `You kept ${habitsKept}% of your habit check-ins this week. Aim for consistency, not perfection.` : "Add one tiny habit you can honestly repeat this week.");
     else if (q.includes("learn") || q.includes("thought") || q.includes("quote") || q.includes("pattern")) setAnswer(data.thoughts.length ? `You’ve saved ${data.thoughts.length} thoughts. ${journal.themes.length ? `The themes showing up most are ${journal.themes.join(", ")}.` : "Keep writing and your recurring themes will begin to appear."}` : "Write your first daily thought, lesson, or quote and I’ll help you notice patterns over time.");
-    else setAnswer(openTask ? `Your next clear action is “${openTask.title}.” Protect a focused block for it.` : "Your focus list is clear. Add the next action that matters most.");
+    else if (q.includes("focus") || q.includes("today") || q.includes("document") || q.includes("note")) setAnswer(focusFromKnowledge(knowledgeFiles, data.notes, data.tasks));
+    else setAnswer(openTask ? `Your next clear action is “${openTask.title}.” Protect a focused block for it.` : focusFromKnowledge(knowledgeFiles, data.notes, data.tasks));
     setQuestion("");
   }
 
@@ -102,7 +173,6 @@ export default function Home() {
       if (kind === "goal") return { ...d, goals: d.goals.filter((x) => x.id !== id) };
       if (kind === "project") return { ...d, projects: d.projects.filter((x) => x.id !== id) };
       if (kind === "habit") return { ...d, habits: d.habits.filter((x) => x.id !== id) };
-      if (kind === "decision") return { ...d, decisions: d.decisions.filter((x) => x.id !== id) };
       if (kind === "note") return { ...d, notes: d.notes.filter((x) => x.id !== id) };
       if (kind === "event") return { ...d, events: d.events.filter((x) => x.id !== id) };
       return { ...d, thoughts: d.thoughts.filter((x) => x.id !== id) };
@@ -117,7 +187,6 @@ export default function Home() {
       if (kind === "goal") return { ...d, goals: put(d.goals, { id, title: values.title, detail: values.detail, progress: Number(values.progress) || 0, color: values.color }) };
       if (kind === "project") return { ...d, projects: put(d.projects, { id, title: values.title, category: values.category, next: values.next, status: values.status, progress: Number(values.progress) || 0, color: values.color }) };
       if (kind === "habit") return { ...d, habits: put(d.habits, { id, name: values.name, streak: Number(values.streak) || 0, week: existingId ? d.habits.find((x) => x.id === id)?.week ?? Array(7).fill(false) : Array(7).fill(false) }) };
-      if (kind === "decision") return { ...d, decisions: put(d.decisions, { id, title: values.title, confidence: Number(values.confidence) || 0, date: values.date, status: values.status }) };
       if (kind === "note") return { ...d, notes: put(d.notes, { id, title: values.title, tag: values.tag, excerpt: values.excerpt }) };
       if (kind === "event") return { ...d, events: put(d.events, { id, title: values.title, date: values.date, time: values.time, category: values.category }) };
       return { ...d, thoughts: put(d.thoughts, { id, text: values.text, date: values.date, type: values.type as Thought["type"] }) };
@@ -141,7 +210,7 @@ export default function Home() {
         <section className="panel projects-panel full"><PanelHeader eyebrow="PROJECT OS" title="What you’re building" action={`${data.projects.length} projects`}/>{data.projects.length ? <div className="project-list">{data.projects.map((project) => <article className="project-row" key={project.id}><span className="project-symbol sage">◇</span><div className="project-main"><span>{project.category}</span><h3>{project.title}</h3><p><b>Next:</b> {project.next}</p></div><div className="project-progress"><strong>{project.progress}%</strong><div className="progress"><i style={{ width: `${project.progress}%` }}/></div></div><em>{project.status}</em><span className="item-actions"><button onClick={() => setEditor({ kind: "project", item: project })}>Edit</button><button onClick={() => remove("project", project.id)}>×</button></span></article>)}</div> : <Empty label="No active projects yet." action="Add a project" onClick={() => setEditor({ kind: "project" })}/>}</section>
         <section className="panel reflection-panel full"><div><span className="eyebrow">WEEKLY REFLECTION</span><h2>What did this week teach you?</h2><p>This is your private space. It saves as you type.</p></div><textarea value={data.reflection} onChange={(e) => setData((d) => ({ ...d, reflection: e.target.value }))} placeholder="Write your reflection…"/></section>
       </div> : (
-        <DetailView active={active} data={data} setData={setData} subtitle={viewCopy[active]?.[1]} noteSearch={noteSearch} setNoteSearch={setNoteSearch} edit={(kind, item) => setEditor({ kind, item })} remove={remove}/>
+        <DetailView active={active} data={data} setData={setData} subtitle={viewCopy[active]?.[1]} noteSearch={noteSearch} setNoteSearch={setNoteSearch} knowledgeFiles={knowledgeFiles} setKnowledgeFiles={setKnowledgeFiles} edit={(kind, item) => setEditor({ kind, item })} remove={remove}/>
       )}
     </main>
     {editor && (
@@ -150,23 +219,71 @@ export default function Home() {
   </div>;
 }
 
-function singular(active: string) { return ({ goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", decisions: "decision", thoughts: "thought" } as Record<string, string>)[active] || "item"; }
+function singular(active: string) { return ({ goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", thoughts: "thought" } as Record<string, string>)[active] || "item"; }
 function PanelHeader({ eyebrow, title, action }: { eyebrow: string; title: string; action: string }) { return <div className="panel-header"><div><span className="eyebrow">{eyebrow}</span><h2>{title}</h2></div><span className="panel-count">{action}</span></div>; }
 function Metric({ label, value, note }: { label: string; value: string; note: string }) { return <div className="metric"><span>{label}</span><strong>{value}</strong><small>{note}</small></div>; }
 function Empty({ label, action, onClick }: { label: string; action: string; onClick: () => void }) { return <div className="empty-state"><span>✦</span><p>{label}</p><button onClick={onClick}>＋ {action}</button></div>; }
 function CardActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) { return <div className="card-actions"><button onClick={onEdit}>Edit</button><button onClick={onDelete} aria-label="Delete">×</button></div>; }
 
-function DetailView({ active, data, setData, subtitle, noteSearch, setNoteSearch, edit, remove }: { active: string; data: DashboardState; setData: React.Dispatch<React.SetStateAction<DashboardState>>; subtitle: string; noteSearch: string; setNoteSearch: (x: string) => void; edit: (kind: Kind, item: Editable) => void; remove: (kind: Kind, id: number) => void }) {
+function DetailView({ active, data, setData, subtitle, noteSearch, setNoteSearch, knowledgeFiles, setKnowledgeFiles, edit, remove }: { active: string; data: DashboardState; setData: React.Dispatch<React.SetStateAction<DashboardState>>; subtitle: string; noteSearch: string; setNoteSearch: (x: string) => void; knowledgeFiles: KnowledgeFile[]; setKnowledgeFiles: React.Dispatch<React.SetStateAction<KnowledgeFile[]>>; edit: (kind: Kind, item: Editable) => void; remove: (kind: Kind, id: number) => void }) {
   const add = () => document.querySelector<HTMLButtonElement>(".capture-button")?.click();
+  const [calendarCursor, setCalendarCursor] = useState(() => new Date());
+  const [uploadMessage, setUploadMessage] = useState("");
+  async function uploadFiles(list: FileList | null) {
+    if (!list?.length) return;
+    setUploadMessage("Reading your files…");
+    const added: KnowledgeFile[] = [];
+    for (const file of Array.from(list)) {
+      if (file.size > 8_000_000) { setUploadMessage(`${file.name} is larger than the 8 MB limit.`); continue; }
+      try {
+        const extracted = await readUploadedFile(file);
+        const entry = { id: Date.now() + added.length, name: file.name, size: file.size, addedAt: new Date().toISOString(), text: extracted.text, kind: extracted.kind };
+        await storeKnowledgeFile(entry);
+        added.push(entry);
+      } catch { setUploadMessage(`I couldn’t read ${file.name}. Try exporting it as a Word or text file.`); }
+    }
+    if (added.length) {
+      setKnowledgeFiles((current) => [...added, ...current]);
+      setUploadMessage(`${added.length} ${added.length === 1 ? "file is" : "files are"} ready to use.`);
+    }
+  }
+  async function deleteKnowledgeFile(id: number) {
+    await eraseKnowledgeFile(id);
+    setKnowledgeFiles((current) => current.filter((file) => file.id !== id));
+  }
   if (active === "goals") return <Page subtitle={subtitle}>{data.goals.length ? <div className="detail-cards">{data.goals.map((goal) => <article className="big-card" key={goal.id}><CardActions onEdit={() => edit("goal", goal)} onDelete={() => remove("goal", goal.id)}/><span className="eyebrow">ACTIVE GOAL</span><h2>{goal.title}</h2><p>{goal.detail}</p><div className="big-number">{goal.progress}%</div><div className="progress"><i style={{ width: `${goal.progress}%`, background: goal.color }}/></div></article>)}</div> : <Empty label="You haven't added any goals." action="Add your first goal" onClick={add}/>}</Page>;
   if (active === "projects") return <Page subtitle={subtitle}>{data.projects.length ? <div className="detail-cards">{data.projects.map((project) => <article className="big-card" key={project.id}><CardActions onEdit={() => edit("project", project)} onDelete={() => remove("project", project.id)}/><span className="eyebrow">{project.category || "PROJECT"}</span><h2>{project.title}</h2><p><b>Next:</b> {project.next}</p><div className="big-number">{project.progress}%</div><div className="progress"><i style={{ width: `${project.progress}%` }}/></div><small className="status-pill">{project.status}</small></article>)}</div> : <Empty label="You haven't added any projects." action="Add your first project" onClick={add}/>}</Page>;
   if (active === "habits") return <Page subtitle={subtitle}>{data.habits.length ? <section className="detail-panel"><div className="experiment-head"><div><span className="eyebrow">THIS WEEK</span><h2>Your consistency, day by day</h2></div><span>Tap a day to check in</span></div>{data.habits.map((habit) => <div className="habit-row" key={habit.id}><div><strong>{habit.name}</strong><small>{habit.week.filter(Boolean).length} of 7 days · {habit.streak} day streak</small></div><div className="habit-controls"><div className="habit-week">{habit.week.map((done, i) => <button className={done ? "kept" : ""} key={i} title={["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i]} onClick={() => setData((d) => ({ ...d, habits: d.habits.map((h) => h.id === habit.id ? { ...h, week: h.week.map((x, n) => n === i ? !x : x) } : h) }))}>{done ? "✓" : ["M","T","W","T","F","S","S"][i]}</button>)}</div><span className="item-actions"><button onClick={() => edit("habit", habit)}>Edit</button><button onClick={() => remove("habit", habit.id)}>×</button></span></div></div>)}</section> : <Empty label="No habits to check in yet." action="Add your first habit" onClick={add}/>}</Page>;
-  if (active === "decisions") return <Page subtitle={subtitle}>{data.decisions.length ? <div className="detail-cards">{data.decisions.map((decision) => <article className="big-card" key={decision.id}><CardActions onEdit={() => edit("decision", decision)} onDelete={() => remove("decision", decision.id)}/><span className="eyebrow">{decision.date}</span><h2>{decision.title}</h2><p>{decision.status}</p><div className="confidence"><strong>{decision.confidence}%</strong><span>confidence at decision time</span></div></article>)}</div> : <Empty label="Your decision journal is empty." action="Record a decision" onClick={add}/>}</Page>;
   if (active === "notes") {
     const shown = data.notes.filter((note) => `${note.title} ${note.tag} ${note.excerpt}`.toLowerCase().includes(noteSearch.toLowerCase()));
-    return <Page subtitle={subtitle}><div className="knowledge-search">⌕<input value={noteSearch} onChange={(e) => setNoteSearch(e.target.value)} placeholder="Search every note…"/></div>{shown.length ? <div className="detail-cards">{shown.map((note) => <article className="big-card note-card" key={note.id}><CardActions onEdit={() => edit("note", note)} onDelete={() => remove("note", note.id)}/><span className="eyebrow">{note.tag || "NOTE"}</span><h2>{note.title}</h2><p>{note.excerpt}</p></article>)}</div> : <Empty label={noteSearch ? "No notes match that search." : "Your notes are empty."} action="Add a note" onClick={add}/>}</Page>;
+    const shownFiles = knowledgeFiles.filter((file) => `${file.name} ${file.kind} ${file.text}`.toLowerCase().includes(noteSearch.toLowerCase()));
+    return <Page subtitle={subtitle}>
+      <section className="knowledge-hero"><div><span className="eyebrow">YOUR KNOWLEDGE LIBRARY</span><h2>Bring your documents into one place.</h2><p>Upload Word documents, text files, Markdown, rich text, or a Google Doc shortcut. For full Google Doc analysis, download it as a Word file first.</p></div><label className="upload-button">↑ Upload files<input type="file" multiple accept=".docx,.txt,.md,.rtf,.gdoc" onChange={(event) => uploadFiles(event.target.files)}/></label></section>
+      {uploadMessage && <div className="upload-message">{uploadMessage}</div>}
+      <section className="knowledge-focus"><div className="ai-orb">✦</div><div><span className="eyebrow">TODAY’S SUGGESTED FOCUS</span><h3>{focusFromKnowledge(knowledgeFiles, data.notes, data.tasks)}</h3><p>This suggestion uses your unfinished tasks, notes, and readable document text.</p></div></section>
+      <div className="knowledge-search">⌕<input value={noteSearch} onChange={(e) => setNoteSearch(e.target.value)} placeholder="Search your notes and uploaded documents…"/></div>
+      {shownFiles.length > 0 && <section className="file-library"><div className="library-heading"><h2>Files</h2><span>{shownFiles.length} saved</span></div>{shownFiles.map((file) => <article className="file-row" key={file.id}><span className="file-icon">{file.name.split(".").pop()?.toUpperCase().slice(0, 4)}</span><div><strong>{file.name}</strong><small>{file.kind} · {(file.size / 1024).toFixed(0)} KB · Added {new Date(file.addedAt).toLocaleDateString()}</small><p>{file.text.slice(0, 150) || "Saved as a reference"}</p></div><button onClick={() => deleteKnowledgeFile(file.id)}>Remove</button></article>)}</section>}
+      <div className="library-heading notes-heading"><h2>Your notes</h2><button onClick={add}>＋ Add a note</button></div>
+      {shown.length ? (
+        <div className="detail-cards">{shown.map((note) => <article className="big-card note-card" key={note.id}><CardActions onEdit={() => edit("note", note)} onDelete={() => remove("note", note.id)}/><span className="eyebrow">{note.tag || "NOTE"}</span><h2>{note.title}</h2><p>{note.excerpt}</p></article>)}</div>
+      ) : (
+        <Empty label={noteSearch ? "No notes match that search." : "Your written notes are empty."} action="Add a note" onClick={add}/>
+      )}
+    </Page>;
   }
-  if (active === "calendar") return <Page subtitle={subtitle}>{data.events.length ? <section className="detail-panel calendar-list">{[...data.events].sort((a,b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`)).map((event) => <article className="calendar-event" key={event.id}><div className="date-tile"><strong>{new Date(`${event.date}T12:00:00`).toLocaleDateString("en-US", { day: "numeric" })}</strong><span>{new Date(`${event.date}T12:00:00`).toLocaleDateString("en-US", { month: "short" })}</span></div><div><span className="eyebrow">{event.category || "EVENT"}</span><h3>{event.title}</h3><p>{event.time || "All day"}</p></div><span className="item-actions"><button onClick={() => edit("event", event)}>Edit</button><button onClick={() => remove("event", event.id)}>×</button></span></article>)}</section> : <Empty label="Your calendar is clear." action="Add an event" onClick={add}/>}</Page>;
+  if (active === "calendar") {
+    const year = calendarCursor.getFullYear();
+    const month = calendarCursor.getMonth();
+    const first = new Date(year, month, 1);
+    const gridStart = new Date(year, month, 1 - first.getDay());
+    const days = Array.from({ length: 42 }, (_, index) => new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index));
+    const today = todayInput();
+    return <Page subtitle={subtitle}><section className="apple-calendar"><header><div className="calendar-nav"><button onClick={() => setCalendarCursor(new Date(year, month - 1, 1))}>‹</button><button onClick={() => setCalendarCursor(new Date())}>Today</button><button onClick={() => setCalendarCursor(new Date(year, month + 1, 1))}>›</button></div><h2>{calendarCursor.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</h2><button className="calendar-add" onClick={add}>＋ Add event</button></header><div className="weekday-row">{["SUN","MON","TUE","WED","THU","FRI","SAT"].map((day) => <span key={day}>{day}</span>)}</div><div className="month-grid">{days.map((day) => {
+      const date = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+      const events = data.events.filter((event) => event.date === date);
+      return <div key={date} className={`${day.getMonth() !== month ? "outside " : ""}${date === today ? "today" : ""}`}><span className="day-number">{day.getDate()}</span><div className="day-events">{events.map((event) => <button key={event.id} className="calendar-pill" onClick={() => edit("event", event)} title={`${event.time || "All day"} · ${event.title}`}><i/>{event.time && <small>{event.time}</small>}{event.title}</button>)}</div></div>;
+    })}</div></section></Page>;
+  }
   const insights = thoughtInsights(data.thoughts);
   return <Page subtitle={subtitle}>
     <section className="thought-hero"><div><span className="eyebrow">YOUR INNER TIMELINE</span><h2>What stayed with you today?</h2><p>A lesson, a quote, or something you simply need to release. Every entry becomes part of the story your dashboard can reflect back to you.</p></div><button onClick={add}>＋ Write today’s thought</button></section>
@@ -188,7 +305,6 @@ function Editor({ editor, onClose, onSave }: { editor: { kind: Kind; item?: Edit
     const defaults: Record<Kind, Record<string, string>> = {
       task: { title: "", meta: "Today · Personal", tag: "Focus" }, goal: { title: "", detail: "", progress: "0", color: colorOptions[0] },
       project: { title: "", category: "Personal", next: "", status: "In progress", progress: "0", color: colorOptions[0] }, habit: { name: "", streak: "0" },
-      decision: { title: "", confidence: "50", date: todayInput(), status: "Revisit later" },
       note: { title: "", tag: "Personal", excerpt: "" }, event: { title: "", date: todayInput(), time: "", category: "Personal" }, thought: { text: "", date: todayInput(), type: "Lesson" },
     };
     return Object.fromEntries(Object.entries(defaults[editor.kind]).map(([key, value]) => [key, item?.[key] === undefined ? value : String(item[key])]));
@@ -202,7 +318,6 @@ function Editor({ editor, onClose, onSave }: { editor: { kind: Kind; item?: Edit
     {editor.kind === "goal" && <><Field label="Goal" value={values.title} onChange={(v) => change("title", v)} required/><Field label="Details" value={values.detail} onChange={(v) => change("detail", v)} wide/><Range label="Progress" value={values.progress} onChange={(v) => change("progress", v)}/><Color value={values.color} onChange={(v) => change("color", v)}/></>}
     {editor.kind === "project" && <><Field label="Project" value={values.title} onChange={(v) => change("title", v)} required/><Field label="Category" value={values.category} onChange={(v) => change("category", v)}/><Field label="Next action" value={values.next} onChange={(v) => change("next", v)} wide/><Select label="Status" value={values.status} options={["In progress","On track","Exploring","Paused","Complete"]} onChange={(v) => change("status", v)}/><Range label="Progress" value={values.progress} onChange={(v) => change("progress", v)}/></>}
     {editor.kind === "habit" && <><Field label="Habit" value={values.name} onChange={(v) => change("name", v)} required/><Field label="Current streak" value={values.streak} onChange={(v) => change("streak", v)} type="number"/></>}
-    {editor.kind === "decision" && <><Field label="Decision" value={values.title} onChange={(v) => change("title", v)} required wide/><Field label="Date" value={values.date} onChange={(v) => change("date", v)} type="date"/><Range label="Confidence" value={values.confidence} onChange={(v) => change("confidence", v)}/><Field label="Status / revisit note" value={values.status} onChange={(v) => change("status", v)} wide/></>}
     {editor.kind === "note" && <><Field label="Title" value={values.title} onChange={(v) => change("title", v)} required/><Field label="Tag" value={values.tag} onChange={(v) => change("tag", v)}/><Field label="Note" value={values.excerpt} onChange={(v) => change("excerpt", v)} wide multiline/></>}
     {editor.kind === "event" && <><Field label="Event" value={values.title} onChange={(v) => change("title", v)} required wide/><Field label="Date" value={values.date} onChange={(v) => change("date", v)} type="date" required/><Field label="Time" value={values.time} onChange={(v) => change("time", v)} type="time"/><Field label="Category" value={values.category} onChange={(v) => change("category", v)}/></>}
     {editor.kind === "thought" && <><Select label="What kind of entry is this?" value={values.type} options={["Lesson","Quote","On my mind"]} onChange={(v) => change("type", v)}/><Field label="Date" value={values.date} onChange={(v) => change("date", v)} type="date" required/><Field label="Write it in your own words" value={values.text} onChange={(v) => change("text", v)} required wide multiline/></>}

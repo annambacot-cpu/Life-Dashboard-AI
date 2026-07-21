@@ -17,6 +17,9 @@ test("ships the Life Dashboard product experience", async () => {
   assert.match(page, /localStorage/);
   assert.match(page, /Daily thoughts/);
   assert.match(page, /WHAT YOUR WORDS ARE SHOWING/);
+  assert.match(page, /Upload files/);
+  assert.match(page, /apple-calendar/);
+  assert.doesNotMatch(page, /Decision journal|\["decisions"/);
   assert.doesNotMatch(page, /Skill tracker|Finance pulse/);
   assert.doesNotMatch(`${page}${layout}${packageJson}`, /codex-preview|react-loading-skeleton/i);
 });
