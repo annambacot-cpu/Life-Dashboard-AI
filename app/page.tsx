@@ -7,35 +7,47 @@ type Goal = { id: number; title: string; progress: number; detail: string; color
 type Project = { id: number; title: string; category: string; progress: number; next: string; status: string; color: string };
 type Habit = { id: number; name: string; streak: number; week: boolean[] };
 type Decision = { id: number; title: string; confidence: number; date: string; status: string };
-type Skill = { id: number; name: string; score: number; evidence: string };
 type Note = { id: number; title: string; tag: string; excerpt: string };
 type CalendarEvent = { id: number; title: string; date: string; time: string; category: string };
-type FinanceEntry = { id: number; label: string; amount: number; type: "income" | "expense" | "savings" };
-type Kind = "task" | "goal" | "project" | "habit" | "decision" | "skill" | "note" | "event" | "finance";
-type Editable = Task | Goal | Project | Habit | Decision | Skill | Note | CalendarEvent | FinanceEntry;
+type Thought = { id: number; text: string; date: string; type: "Lesson" | "Quote" | "On my mind" };
+type Kind = "task" | "goal" | "project" | "habit" | "decision" | "note" | "event" | "thought";
+type Editable = Task | Goal | Project | Habit | Decision | Note | CalendarEvent | Thought;
 type DashboardState = {
   tasks: Task[]; goals: Goal[]; projects: Project[]; habits: Habit[]; decisions: Decision[];
-  skills: Skill[]; notes: Note[]; events: CalendarEvent[]; finances: FinanceEntry[]; reflection: string;
+  notes: Note[]; events: CalendarEvent[]; thoughts: Thought[]; reflection: string;
 };
 
 const STORAGE_KEY = "life-dashboard-ai-v2";
-const emptyState: DashboardState = { tasks: [], goals: [], projects: [], habits: [], decisions: [], skills: [], notes: [], events: [], finances: [], reflection: "" };
+const emptyState: DashboardState = { tasks: [], goals: [], projects: [], habits: [], decisions: [], notes: [], events: [], thoughts: [], reflection: "" };
 const navItems = [
   ["overview", "⌂", "Overview"], ["goals", "◎", "Goals"], ["projects", "◇", "Projects"],
   ["habits", "↻", "Habits"], ["calendar", "□", "Calendar"], ["notes", "≡", "Notes & knowledge"],
-  ["decisions", "⌘", "Decisions"], ["skills", "△", "Skills"], ["finance", "$", "Finances"],
+  ["decisions", "⌘", "Decisions"], ["thoughts", "✦", "Daily thoughts"],
 ] as const;
 const viewCopy: Record<string, [string, string]> = {
   goals: ["Goals", "Turn the life you want into progress you can see."], projects: ["Projects", "Everything active, with the next action already decided."],
   habits: ["Habits", "Build consistency one honest check-in at a time."], calendar: ["Calendar", "See your commitments without losing sight of what matters."],
   notes: ["Notes & knowledge", "Your private, searchable brain for ideas, research, and memories."], decisions: ["Decision journal", "Record your reasoning so future you can learn from it."],
-  skills: ["Skill tracker", "Measure growth with evidence, not just intention."], finance: ["Finance pulse", "A clear view of where your money goes and what it makes possible."],
+  thoughts: ["Daily thoughts", "Keep the lessons, quotes, and honest thoughts that shape who you’re becoming."],
 };
-const kindForView: Record<string, Kind> = { goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", decisions: "decision", skills: "skill", finance: "finance" };
+const kindForView: Record<string, Kind> = { goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", decisions: "decision", thoughts: "thought" };
 const colorOptions = ["#28645c", "#de7d4c", "#7763a8", "#4177a6", "#a65d75"];
 
 function todayInput() { return new Date().toISOString().slice(0, 10); }
-function money(value: number) { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(value); }
+function thoughtInsights(thoughts: Thought[]) {
+  const stopWords = new Set(["about", "after", "again", "being", "could", "every", "from", "have", "into", "just", "more", "only", "other", "really", "something", "their", "there", "these", "thing", "today", "when", "where", "which", "with", "would", "your", "that", "this", "they", "what", "people"]);
+  const counts = new Map<string, number>();
+  thoughts.forEach((entry) => entry.text.toLowerCase().match(/[a-z']{5,}/g)?.forEach((word) => { if (!stopWords.has(word)) counts.set(word, (counts.get(word) || 0) + 1); }));
+  const themes = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([word]) => word);
+  const month = new Date().toISOString().slice(0, 7);
+  const thisMonth = thoughts.filter((entry) => entry.date.startsWith(month)).length;
+  const dates = new Set(thoughts.map((entry) => entry.date));
+  let streak = 0;
+  const cursor = new Date();
+  if (!dates.has(cursor.toISOString().slice(0, 10))) cursor.setDate(cursor.getDate() - 1);
+  while (dates.has(cursor.toISOString().slice(0, 10))) { streak += 1; cursor.setDate(cursor.getDate() - 1); }
+  return { themes, thisMonth, streak };
+}
 
 export default function Home() {
   const [data, setData] = useState<DashboardState>(emptyState);
@@ -75,9 +87,11 @@ export default function Home() {
     const q = question.toLowerCase();
     const openTask = data.tasks.find((task) => !task.done);
     const topGoal = [...data.goals].sort((a, b) => b.progress - a.progress)[0];
+    const journal = thoughtInsights(data.thoughts);
     if (!data.tasks.length && !data.goals.length) setAnswer("Start by adding one meaningful goal and the next task that moves it forward.");
     else if (q.includes("goal") || q.includes("progress")) setAnswer(topGoal ? `${topGoal.title} is currently at ${topGoal.progress}%. A small next action today will keep it moving.` : "Add a goal first, then I can help you track its progress.");
     else if (q.includes("habit")) setAnswer(data.habits.length ? `You kept ${habitsKept}% of your habit check-ins this week. Aim for consistency, not perfection.` : "Add one tiny habit you can honestly repeat this week.");
+    else if (q.includes("learn") || q.includes("thought") || q.includes("quote") || q.includes("pattern")) setAnswer(data.thoughts.length ? `You’ve saved ${data.thoughts.length} thoughts. ${journal.themes.length ? `The themes showing up most are ${journal.themes.join(", ")}.` : "Keep writing and your recurring themes will begin to appear."}` : "Write your first daily thought, lesson, or quote and I’ll help you notice patterns over time.");
     else setAnswer(openTask ? `Your next clear action is “${openTask.title}.” Protect a focused block for it.` : "Your focus list is clear. Add the next action that matters most.");
     setQuestion("");
   }
@@ -89,10 +103,9 @@ export default function Home() {
       if (kind === "project") return { ...d, projects: d.projects.filter((x) => x.id !== id) };
       if (kind === "habit") return { ...d, habits: d.habits.filter((x) => x.id !== id) };
       if (kind === "decision") return { ...d, decisions: d.decisions.filter((x) => x.id !== id) };
-      if (kind === "skill") return { ...d, skills: d.skills.filter((x) => x.id !== id) };
       if (kind === "note") return { ...d, notes: d.notes.filter((x) => x.id !== id) };
       if (kind === "event") return { ...d, events: d.events.filter((x) => x.id !== id) };
-      return { ...d, finances: d.finances.filter((x) => x.id !== id) };
+      return { ...d, thoughts: d.thoughts.filter((x) => x.id !== id) };
     });
   }
 
@@ -105,10 +118,9 @@ export default function Home() {
       if (kind === "project") return { ...d, projects: put(d.projects, { id, title: values.title, category: values.category, next: values.next, status: values.status, progress: Number(values.progress) || 0, color: values.color }) };
       if (kind === "habit") return { ...d, habits: put(d.habits, { id, name: values.name, streak: Number(values.streak) || 0, week: existingId ? d.habits.find((x) => x.id === id)?.week ?? Array(7).fill(false) : Array(7).fill(false) }) };
       if (kind === "decision") return { ...d, decisions: put(d.decisions, { id, title: values.title, confidence: Number(values.confidence) || 0, date: values.date, status: values.status }) };
-      if (kind === "skill") return { ...d, skills: put(d.skills, { id, name: values.name, score: Number(values.score) || 0, evidence: values.evidence }) };
       if (kind === "note") return { ...d, notes: put(d.notes, { id, title: values.title, tag: values.tag, excerpt: values.excerpt }) };
       if (kind === "event") return { ...d, events: put(d.events, { id, title: values.title, date: values.date, time: values.time, category: values.category }) };
-      return { ...d, finances: put(d.finances, { id, label: values.label, amount: Number(values.amount) || 0, type: values.type as FinanceEntry["type"] }) };
+      return { ...d, thoughts: put(d.thoughts, { id, text: values.text, date: values.date, type: values.type as Thought["type"] }) };
     });
     setEditor(null);
   }
@@ -138,7 +150,7 @@ export default function Home() {
   </div>;
 }
 
-function singular(active: string) { return ({ goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", decisions: "decision", skills: "skill", finance: "entry" } as Record<string, string>)[active] || "item"; }
+function singular(active: string) { return ({ goals: "goal", projects: "project", habits: "habit", calendar: "event", notes: "note", decisions: "decision", thoughts: "thought" } as Record<string, string>)[active] || "item"; }
 function PanelHeader({ eyebrow, title, action }: { eyebrow: string; title: string; action: string }) { return <div className="panel-header"><div><span className="eyebrow">{eyebrow}</span><h2>{title}</h2></div><span className="panel-count">{action}</span></div>; }
 function Metric({ label, value, note }: { label: string; value: string; note: string }) { return <div className="metric"><span>{label}</span><strong>{value}</strong><small>{note}</small></div>; }
 function Empty({ label, action, onClick }: { label: string; action: string; onClick: () => void }) { return <div className="empty-state"><span>✦</span><p>{label}</p><button onClick={onClick}>＋ {action}</button></div>; }
@@ -150,16 +162,22 @@ function DetailView({ active, data, setData, subtitle, noteSearch, setNoteSearch
   if (active === "projects") return <Page subtitle={subtitle}>{data.projects.length ? <div className="detail-cards">{data.projects.map((project) => <article className="big-card" key={project.id}><CardActions onEdit={() => edit("project", project)} onDelete={() => remove("project", project.id)}/><span className="eyebrow">{project.category || "PROJECT"}</span><h2>{project.title}</h2><p><b>Next:</b> {project.next}</p><div className="big-number">{project.progress}%</div><div className="progress"><i style={{ width: `${project.progress}%` }}/></div><small className="status-pill">{project.status}</small></article>)}</div> : <Empty label="You haven't added any projects." action="Add your first project" onClick={add}/>}</Page>;
   if (active === "habits") return <Page subtitle={subtitle}>{data.habits.length ? <section className="detail-panel"><div className="experiment-head"><div><span className="eyebrow">THIS WEEK</span><h2>Your consistency, day by day</h2></div><span>Tap a day to check in</span></div>{data.habits.map((habit) => <div className="habit-row" key={habit.id}><div><strong>{habit.name}</strong><small>{habit.week.filter(Boolean).length} of 7 days · {habit.streak} day streak</small></div><div className="habit-controls"><div className="habit-week">{habit.week.map((done, i) => <button className={done ? "kept" : ""} key={i} title={["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][i]} onClick={() => setData((d) => ({ ...d, habits: d.habits.map((h) => h.id === habit.id ? { ...h, week: h.week.map((x, n) => n === i ? !x : x) } : h) }))}>{done ? "✓" : ["M","T","W","T","F","S","S"][i]}</button>)}</div><span className="item-actions"><button onClick={() => edit("habit", habit)}>Edit</button><button onClick={() => remove("habit", habit.id)}>×</button></span></div></div>)}</section> : <Empty label="No habits to check in yet." action="Add your first habit" onClick={add}/>}</Page>;
   if (active === "decisions") return <Page subtitle={subtitle}>{data.decisions.length ? <div className="detail-cards">{data.decisions.map((decision) => <article className="big-card" key={decision.id}><CardActions onEdit={() => edit("decision", decision)} onDelete={() => remove("decision", decision.id)}/><span className="eyebrow">{decision.date}</span><h2>{decision.title}</h2><p>{decision.status}</p><div className="confidence"><strong>{decision.confidence}%</strong><span>confidence at decision time</span></div></article>)}</div> : <Empty label="Your decision journal is empty." action="Record a decision" onClick={add}/>}</Page>;
-  if (active === "skills") return <Page subtitle={subtitle}>{data.skills.length ? <section className="detail-panel">{data.skills.map((skill) => <div className="skill-row" key={skill.id}><div><strong>{skill.name}</strong><small>{skill.evidence}</small></div><div className="progress"><i style={{ width: `${skill.score}%` }}/></div><b>{skill.score}</b><span className="item-actions"><button onClick={() => edit("skill", skill)}>Edit</button><button onClick={() => remove("skill", skill.id)}>×</button></span></div>)}</section> : <Empty label="No skills are being tracked." action="Add a skill" onClick={add}/>}</Page>;
   if (active === "notes") {
     const shown = data.notes.filter((note) => `${note.title} ${note.tag} ${note.excerpt}`.toLowerCase().includes(noteSearch.toLowerCase()));
     return <Page subtitle={subtitle}><div className="knowledge-search">⌕<input value={noteSearch} onChange={(e) => setNoteSearch(e.target.value)} placeholder="Search every note…"/></div>{shown.length ? <div className="detail-cards">{shown.map((note) => <article className="big-card note-card" key={note.id}><CardActions onEdit={() => edit("note", note)} onDelete={() => remove("note", note.id)}/><span className="eyebrow">{note.tag || "NOTE"}</span><h2>{note.title}</h2><p>{note.excerpt}</p></article>)}</div> : <Empty label={noteSearch ? "No notes match that search." : "Your notes are empty."} action="Add a note" onClick={add}/>}</Page>;
   }
   if (active === "calendar") return <Page subtitle={subtitle}>{data.events.length ? <section className="detail-panel calendar-list">{[...data.events].sort((a,b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`)).map((event) => <article className="calendar-event" key={event.id}><div className="date-tile"><strong>{new Date(`${event.date}T12:00:00`).toLocaleDateString("en-US", { day: "numeric" })}</strong><span>{new Date(`${event.date}T12:00:00`).toLocaleDateString("en-US", { month: "short" })}</span></div><div><span className="eyebrow">{event.category || "EVENT"}</span><h3>{event.title}</h3><p>{event.time || "All day"}</p></div><span className="item-actions"><button onClick={() => edit("event", event)}>Edit</button><button onClick={() => remove("event", event.id)}>×</button></span></article>)}</section> : <Empty label="Your calendar is clear." action="Add an event" onClick={add}/>}</Page>;
-  const income = data.finances.filter((x) => x.type === "income").reduce((s,x) => s + x.amount, 0);
-  const expenses = data.finances.filter((x) => x.type === "expense").reduce((s,x) => s + x.amount, 0);
-  const savings = data.finances.filter((x) => x.type === "savings").reduce((s,x) => s + x.amount, 0);
-  return <Page subtitle={subtitle}><div className="finance-grid"><article><span>Income logged</span><strong>{money(income)}</strong><small>Your total income entries</small></article><article><span>Expenses logged</span><strong>{money(expenses)}</strong><small>Your total spending</small></article><article><span>Saved toward goals</span><strong>{money(savings)}</strong><small>Set aside intentionally</small></article></div>{data.finances.length ? <section className="detail-panel finance-list"><PanelHeader eyebrow="MONEY LOG" title="Your entries" action={`${money(income - expenses - savings)} available`}/>{data.finances.map((entry) => <article className="finance-entry" key={entry.id}><span className={`money-type ${entry.type}`}>{entry.type}</span><strong>{entry.label}</strong><b>{entry.type === "income" ? "+" : "−"}{money(entry.amount)}</b><span className="item-actions"><button onClick={() => edit("finance", entry)}>Edit</button><button onClick={() => remove("finance", entry.id)}>×</button></span></article>)}</section> : <Empty label="No money entries yet." action="Add income, expense, or savings" onClick={add}/>}</Page>;
+  const insights = thoughtInsights(data.thoughts);
+  return <Page subtitle={subtitle}>
+    <section className="thought-hero"><div><span className="eyebrow">YOUR INNER TIMELINE</span><h2>What stayed with you today?</h2><p>A lesson, a quote, or something you simply need to release. Every entry becomes part of the story your dashboard can reflect back to you.</p></div><button onClick={add}>＋ Write today’s thought</button></section>
+    <div className="insight-grid"><article><span>Entries saved</span><strong>{data.thoughts.length}</strong><small>Your personal history</small></article><article><span>This month</span><strong>{insights.thisMonth}</strong><small>Moments captured</small></article><article><span>Reflection streak</span><strong>{insights.streak}</strong><small>{insights.streak === 1 ? "day" : "days"} in a row</small></article></div>
+    <section className="thought-insight"><span className="ai-orb">✦</span><div><span className="eyebrow">WHAT YOUR WORDS ARE SHOWING</span><h3>{data.thoughts.length < 3 ? "Your patterns will grow clearer as you write." : "A few themes keep returning."}</h3><p>{insights.themes.length ? `Your recent reflections are circling around ${insights.themes.join(", ")}. These themes can help you see what has been taking up emotional space and where you may be growing.` : "Add honest entries in your own words. Over time, Life AI will surface recurring themes and show how your perspective is changing."}</p></div></section>
+    {data.thoughts.length ? (
+      <section className="thought-timeline">{[...data.thoughts].sort((a,b) => `${b.date}${b.id}`.localeCompare(`${a.date}${a.id}`)).map((thought) => <article className="thought-entry" key={thought.id}><div className="thought-date"><strong>{new Date(`${thought.date}T12:00:00`).toLocaleDateString("en-US", { day: "numeric" })}</strong><span>{new Date(`${thought.date}T12:00:00`).toLocaleDateString("en-US", { month: "short" })}</span></div><div><span className="thought-type">{thought.type}</span><blockquote>“{thought.text}”</blockquote></div><span className="item-actions"><button onClick={() => edit("thought", thought)}>Edit</button><button onClick={() => remove("thought", thought.id)}>×</button></span></article>)}</section>
+    ) : (
+      <Empty label="This is a judgment-free space for whatever is on your mind." action="Write your first thought" onClick={add}/>
+    )}
+  </Page>;
 }
 
 function Page({ subtitle, children }: { subtitle: string; children: React.ReactNode }) { return <div className="detail-page"><p className="page-intro">{subtitle}</p>{children}</div>; }
@@ -170,8 +188,8 @@ function Editor({ editor, onClose, onSave }: { editor: { kind: Kind; item?: Edit
     const defaults: Record<Kind, Record<string, string>> = {
       task: { title: "", meta: "Today · Personal", tag: "Focus" }, goal: { title: "", detail: "", progress: "0", color: colorOptions[0] },
       project: { title: "", category: "Personal", next: "", status: "In progress", progress: "0", color: colorOptions[0] }, habit: { name: "", streak: "0" },
-      decision: { title: "", confidence: "50", date: todayInput(), status: "Revisit later" }, skill: { name: "", score: "0", evidence: "" },
-      note: { title: "", tag: "Personal", excerpt: "" }, event: { title: "", date: todayInput(), time: "", category: "Personal" }, finance: { label: "", amount: "", type: "expense" },
+      decision: { title: "", confidence: "50", date: todayInput(), status: "Revisit later" },
+      note: { title: "", tag: "Personal", excerpt: "" }, event: { title: "", date: todayInput(), time: "", category: "Personal" }, thought: { text: "", date: todayInput(), type: "Lesson" },
     };
     return Object.fromEntries(Object.entries(defaults[editor.kind]).map(([key, value]) => [key, item?.[key] === undefined ? value : String(item[key])]));
   }, [editor]);
@@ -185,10 +203,9 @@ function Editor({ editor, onClose, onSave }: { editor: { kind: Kind; item?: Edit
     {editor.kind === "project" && <><Field label="Project" value={values.title} onChange={(v) => change("title", v)} required/><Field label="Category" value={values.category} onChange={(v) => change("category", v)}/><Field label="Next action" value={values.next} onChange={(v) => change("next", v)} wide/><Select label="Status" value={values.status} options={["In progress","On track","Exploring","Paused","Complete"]} onChange={(v) => change("status", v)}/><Range label="Progress" value={values.progress} onChange={(v) => change("progress", v)}/></>}
     {editor.kind === "habit" && <><Field label="Habit" value={values.name} onChange={(v) => change("name", v)} required/><Field label="Current streak" value={values.streak} onChange={(v) => change("streak", v)} type="number"/></>}
     {editor.kind === "decision" && <><Field label="Decision" value={values.title} onChange={(v) => change("title", v)} required wide/><Field label="Date" value={values.date} onChange={(v) => change("date", v)} type="date"/><Range label="Confidence" value={values.confidence} onChange={(v) => change("confidence", v)}/><Field label="Status / revisit note" value={values.status} onChange={(v) => change("status", v)} wide/></>}
-    {editor.kind === "skill" && <><Field label="Skill" value={values.name} onChange={(v) => change("name", v)} required/><Range label="Current level" value={values.score} onChange={(v) => change("score", v)}/><Field label="Evidence of growth" value={values.evidence} onChange={(v) => change("evidence", v)} wide/></>}
     {editor.kind === "note" && <><Field label="Title" value={values.title} onChange={(v) => change("title", v)} required/><Field label="Tag" value={values.tag} onChange={(v) => change("tag", v)}/><Field label="Note" value={values.excerpt} onChange={(v) => change("excerpt", v)} wide multiline/></>}
     {editor.kind === "event" && <><Field label="Event" value={values.title} onChange={(v) => change("title", v)} required wide/><Field label="Date" value={values.date} onChange={(v) => change("date", v)} type="date" required/><Field label="Time" value={values.time} onChange={(v) => change("time", v)} type="time"/><Field label="Category" value={values.category} onChange={(v) => change("category", v)}/></>}
-    {editor.kind === "finance" && <><Field label="Name" value={values.label} onChange={(v) => change("label", v)} required/><Field label="Amount" value={values.amount} onChange={(v) => change("amount", v)} type="number" required/><Select label="Type" value={values.type} options={["income","expense","savings"]} onChange={(v) => change("type", v)}/></>}
+    {editor.kind === "thought" && <><Select label="What kind of entry is this?" value={values.type} options={["Lesson","Quote","On my mind"]} onChange={(v) => change("type", v)}/><Field label="Date" value={values.date} onChange={(v) => change("date", v)} type="date" required/><Field label="Write it in your own words" value={values.text} onChange={(v) => change("text", v)} required wide multiline/></>}
   </div><div className="modal-footer"><span>Changes save to this browser</span><button type="button" className="cancel-button" onClick={onClose}>Cancel</button><button type="submit">Save changes</button></div></form></div>;
 }
 function Field({ label, value, onChange, required, wide, multiline, type = "text" }: { label: string; value: string; onChange: (v: string) => void; required?: boolean; wide?: boolean; multiline?: boolean; type?: string }) { return <label className={`field ${wide ? "wide" : ""}`}><span>{label}</span>{multiline ? <textarea value={value} onChange={(e) => onChange(e.target.value)} required={required}/> : <input type={type} min={type === "number" ? "0" : undefined} value={value} onChange={(e) => onChange(e.target.value)} required={required}/>}</label>; }

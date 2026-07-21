@@ -15,6 +15,9 @@ test("ships the Life Dashboard product experience", async () => {
   assert.match(page, /What should I focus on today/);
   assert.match(page, /life-dashboard-ai/);
   assert.match(page, /localStorage/);
+  assert.match(page, /Daily thoughts/);
+  assert.match(page, /WHAT YOUR WORDS ARE SHOWING/);
+  assert.doesNotMatch(page, /Skill tracker|Finance pulse/);
   assert.doesNotMatch(`${page}${layout}${packageJson}`, /codex-preview|react-loading-skeleton/i);
 });
 
